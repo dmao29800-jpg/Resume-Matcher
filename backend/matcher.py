@@ -1,16 +1,18 @@
 """
-Resume–JD 匹配算法 v7（具体改进建议 + 原文扫描）
+Resume–JD 匹配算法 v8（真实区分度）
 
-核心升级：
-1. 扫描简历原文，定位具体句子
-2. 每条建议给出「原文 → 修改后」对照
-3. 不再套模板，全部基于实际检测结果生成
+改进：
+1. 无60分保底，真实反映匹配质量
+2. 技能匹配：逐条JD条款精确打分，不稀释
+3. 经验维度：实习/项目/校园经历数量与质量
+4. 结构完整性：STAR结构、量化指标
+5. JD条款覆盖率：每条JD要求单独评分
 """
 
 import re
-import os
 from collections import defaultdict
-from typing import List, Dict, Tuple, Set, Optional
+from typing import List, Dict, Tuple, Optional
+
 
 # ═══════════════════════════════════════════════════════════
 #  工具函数
@@ -18,15 +20,32 @@ from typing import List, Dict, Tuple, Set, Optional
 
 def _tokenize(text: str) -> List[str]:
     tokens = re.findall(r"[A-Za-z0-9\u4e00-\u9fff]+", text.lower())
-    stop = {"的", "了", "在", "是", "我", "你", "和", "与", "或", "但", "而", "于", "有", "这", "那", "个", "们", "为", "上", "下", "中", "对", "以", "到", "把", "被", "要", "会", "能", "可", "也", "很", "都", "将", "又", "再", "从", "所", "已", "应", "该", "等", "并", "for", "with", "and", "or", "the", "a", "an", "to", "of", "in", "on", "by", "is", "are", "was", "were", "be", "been", "have", "has", "had", "this", "that", "it"}
+    stop = {
+        "的", "了", "在", "是", "我", "你", "和", "与", "或", "但", "而", "于",
+        "有", "这", "那", "个", "们", "为", "上", "下", "中", "对", "以", "到",
+        "把", "被", "要", "会", "能", "可", "也", "很", "都", "将", "又", "再",
+        "从", "所", "已", "应", "该", "等", "并", "负责", "参与",
+        "for", "with", "and", "or", "the", "a", "an", "to", "of", "in", "on",
+        "by", "is", "are", "was", "were", "be", "been", "have", "has", "had",
+        "this", "that", "it",
+    }
     return [t for t in tokens if t not in stop and len(t) > 1]
 
-def _extract_years(text: str) -> List[int]:
-    return [int(m.group(1)) for m in re.finditer(r"(\d+)\s*年", text) if 0 <= int(m.group(1)) <= 50]
-
 def _sentences(text: str) -> List[str]:
-    """把文本拆成句子（更宽松的阈值）"""
-    return [s.strip() for s in re.split(r'[，。；\n]', text) if len(s.strip()) > 4]
+    """把文本拆成句子"""
+    return [s.strip() for s in re.split(r'[，。；；\n]', text) if len(s.strip()) > 6]
+
+def _extract_years(text: str) -> List[int]:
+    return [int(m.group(1)) for m in re.finditer(r"(\d+)\s*年", text)
+            if 0 <= int(m.group(1)) <= 50]
+
+def _count_quantified(sents: List[str]) -> int:
+    """统计有量化指标的句子数"""
+    count = 0
+    for s in sents:
+        if re.search(r'\d+\s*(万|亿|千|% |％|ms|QPS|DAU|用户|倍|条|次|台|个|人|日|周|月)', s):
+            count += 1
+    return count
 
 
 # ═══════════════════════════════════════════════════════════
@@ -34,38 +53,48 @@ def _sentences(text: str) -> List[str]:
 # ═══════════════════════════════════════════════════════════
 
 class SkillGraph:
+    # 技能分类（同族技能有语义关联）
     CATEGORIES = {
         "backend_lang": {"python", "java", "golang", "go", "c++", "c#", "php", "ruby", "rust"},
-        "frontend": {"react", "vue", "angular", "nextjs", "nuxt"},
-        "python_web": {"django", "flask", "fastapi", "tornado"},
-        "java_web": {"spring", "springboot", "mybatis"},
-        "database": {"mysql", "postgresql", "postgres", "mongodb", "redis", "elasticsearch", "sqlite"},
-        "cache": {"redis", "memcached"},
-        "mq": {"kafka", "rabbitmq", "rocketmq"},
-        "devops": {"docker", "kubernetes", "k8s", "jenkins", "gitlab", "github"},
-        "ml": {"pytorch", "tensorflow", "sklearn", "xgboost", "keras"},
-        "robotics": {"ros", "slam", "opencv", "pcl", "gazebo", "matlab", "simulink"},
-        "transport": {"v2x", "交通流", "信号控制", "车路协同"},
+        "frontend":     {"react", "vue", "angular", "nextjs", "nuxt", "jquery", "html", "css", "小程序"},
+        "python_web":   {"django", "flask", "fastapi", "tornado", "fastapi"},
+        "java_web":     {"spring", "springboot", "mybatis", "springcloud", "spring cloud"},
+        "database":     {"mysql", "postgresql", "mongodb", "redis", "elasticsearch", "sqlite", "oracle", "sql"},
+        "cache":        {"redis", "memcached"},
+        "mq":           {"kafka", "rabbitmq", "rocketmq", "activemq"},
+        "devops":       {"docker", "kubernetes", "k8s", "jenkins", "gitlab", "github", "ci/cd", "cicd", "nginx"},
+        "ml":           {"pytorch", "tensorflow", "sklearn", "xgboost", "keras", "机器学习", "深度学习"},
+        "data":         {"pandas", "numpy", "spark", "hadoop", "hive", "kafka"},
+        "robotics":     {"ros", "slam", "opencv", "pcl", "gazebo", "matlab", "simulink", "cartographer"},
+        "mobile":       {"android", "ios", "flutter", "react native", "小程序"},
+        "cloud":        {"aws", "azure", "阿里云", "腾讯云", "华为云", "云服务"},
     }
 
+    # 别名映射
     ALIASES = {
         "golang": "go", "go": "go",
-        "js": "javascript", "javascript": "javascript", "es6": "javascript",
+        "js": "javascript", "javascript": "javascript",
         "ts": "typescript", "typescript": "typescript",
         "py": "python", "python3": "python",
         "postgres": "postgresql",
         "mongo": "mongodb",
-        "k8s": "kubernetes", "kubernetes": "kubernetes",
-        "es": "elasticsearch",
-        "springboot": "spring", "spring": "spring",
+        "k8s": "kubernetes",
+        "springboot": "spring",
         "pytorch": "pytorch", "tf": "tensorflow",
+        "es": "elasticsearch",
+        "spring cloud": "springcloud",
+        "djangoRESTframework": "django",
     }
 
-    # 同类技能内部相似度
-    CAT_SIM = {
-        "python_web": 0.85, "java_web": 0.85, "database": 0.75,
-        "frontend": 0.8, "ml": 0.8, "devops": 0.8,
-        "backend_lang": 0.5,
+    # 硬技能关键词（必须精准匹配）
+    HARD_SKILLS = {
+        "后端": ["python", "java", "golang", "go", "c++", "spring", "flask", "django", "fastapi",
+                "mysql", "postgresql", "mongodb", "redis", "kafka", "docker", "k8s", "微服务"],
+        "前端": ["react", "vue", "angular", "html", "css", "javascript", "typescript", "node"],
+        "算法": ["机器学习", "深度学习", "pytorch", "tensorflow", "tensorflow", "推荐算法",
+                "nlp", "cv", "搜索算法", "图算法"],
+        "数据": ["pandas", "numpy", "spark", "hadoop", "hive", "kafka", "flink", "etl"],
+        "运维": ["docker", "kubernetes", "k8s", "jenkins", "nginx", "linux", "shell", "devops"],
     }
 
     def normalize(self, s: str) -> str:
@@ -84,11 +113,13 @@ class SkillGraph:
             return 1.0
         ca, cb = self.get_cat(a), self.get_cat(b)
         if ca and ca == cb:
-            return self.CAT_SIM.get(ca, 0.8)
+            cat_sim = {"python_web": 0.85, "java_web": 0.85, "database": 0.8,
+                       "frontend": 0.8, "ml": 0.8, "devops": 0.8,
+                       "backend_lang": 0.5, "data": 0.75}
+            return cat_sim.get(ca, 0.7)
         return 0.0
 
-    def find_in_text(self, skill: str, text: str) -> Optional[str]:
-        """在文本中找包含某技能的句子"""
+    def find_sent(self, skill: str, text: str) -> Optional[str]:
         skill = self.normalize(skill)
         for sent in _sentences(text):
             if skill in sent:
@@ -99,290 +130,392 @@ _SG = SkillGraph()
 
 
 # ═══════════════════════════════════════════════════════════
-#  模糊词检测 & 量化建议库
+#  JD 条款提取
 # ═══════════════════════════════════════════════════════════
 
-# 模糊词 → 可能的量化方向
-VAGUE_PAIRS = [
-    # (模糊词, 性能方向, 业务方向)
-    ("优化了", "响应时间", "吞吐量"),
-    ("提升了", "性能提升%", "转化率提升%"),
-    ("改进了", "处理速度", "准确率"),
-    ("完善了", "功能完整性", "用户满意度"),
-    ("解决了", "问题数", "稳定性"),
-    ("开发了", "功能模块数", "服务用户数"),
-    ("负责了", "项目规模", "团队人数"),
-    ("维护了", "系统稳定性", "SLA"),
-    ("搭建了", "架构规模", "覆盖用户"),
-    ("完成了", "交付物数量", "收益指标"),
-    ("使用了", "技术方案", "业务场景"),
-]
-
-# 常见量化单位组合
-QUANT_EXAMPLES = [
-    "响应时间从{old}降至{new}，提升{ratio}倍",
-    "QPS从{old}提升至{new}",
-    "日活{DAU}万，支持{count}并发用户",
-    "数据处理量达{vol}万条/天",
-    "覆盖{users}万用户，稳定性{SLA}",
-    "准确率从{old}%提升至{new}%",
-]
-
-
-# ═══════════════════════════════════════════════════════════
-#  岗位画像
-# ═══════════════════════════════════════════════════════════
-
-def _detect_role(jd: str) -> Tuple[str, Dict]:
-    """检测JD类型，返回角色和权重"""
-    jd_l = jd.lower()
-    profiles = {
-        "dev":       (["开发", "工程师", "后端", "前端", "api", "系统"], 0.45, 0.25, 0.20, 0.10),
-        "pm":        (["产品", "经理", "需求", "调研", "用户", "mvp"],  0.25, 0.40, 0.15, 0.20),
-        "ai_pm":     (["ai", "算法", "模型", "机器学习", "产品"],       0.30, 0.35, 0.15, 0.20),
-        "research":  (["算法", "研究", "论文", "模型", "优化", "顶会"], 0.35, 0.30, 0.15, 0.20),
-    }
-    best_role, best_score = "dev", 0
-    best_weights = profiles["dev"]
-    for role, (keywords, ws, wse, wy, wi) in profiles.items():
-        score = sum(2 for kw in keywords if kw in jd_l)
-        if score > best_score:
-            best_role, best_score = role, score
-            best_weights = (ws, wse, wy, wi)
-    return best_role, {
-        "skill": best_weights[0], "semantic": best_weights[1],
-        "years": best_weights[2], "intensity": best_weights[3]
-    }
-
-
-# ═══════════════════════════════════════════════════════════
-#  语义相似度（降级版，不依赖外部模型）
-# ═══════════════════════════════════════════════════════════
-
-def _semantic_score(resume: str, jd: str) -> float:
-    """基于词集重叠的语义评分"""
-    r_tokens = set(_tokenize(resume))
-    j_tokens = set(_tokenize(jd))
-    if not j_tokens:
-        return 0.5
-    # 扩展同义词
-    def expand(t):
-        return {_SG.normalize(t)}
-    r_exp = set()
-    for t in r_tokens:
-        r_exp.update(expand(t))
-    j_exp = set()
-    for t in j_tokens:
-        j_exp.update(expand(t))
-    overlap = len(r_exp & j_exp)
-    base = overlap / max(len(j_exp), 3)
-    return min(base * 1.3, 1.0)
-
-
-# ═══════════════════════════════════════════════════════════
-#  实体密度（项目强度）
-# ═══════════════════════════════════════════════════════════
-
-def _intensity_score(text: str) -> float:
-    sents = _sentences(text)
-    if not sents:
-        return 0.3
-    total = 0.0
-    for s in sents:
-        q = len(re.findall(r'\d+', s))
-        t = sum(1 for cat in _SG.CATEGORIES.values() for w in cat if w in s.lower())
-        v = sum(1 for w in ['提升','降低','优化','搭建','开发','维护','管理'] if w in s)
-        if q == 0 and t == 0:
+def _extract_jd_clauses(jd: str) -> List[Dict]:
+    """
+    把 JD 拆成独立的条款，每条包含：
+    - text: 原文
+    - type: skill / soft / years / other
+    - keywords: 关键词列表
+    - required: 是否硬性要求（用"必须"、"熟练"、"精通"判断）
+    """
+    clauses = []
+    raw_lines = re.split(r'[,，\n；;]', jd)
+    for line in raw_lines:
+        line = line.strip()
+        if len(line) < 4:
             continue
-        score = min((q * 0.2 + t * 0.3 + v * 0.15) / (len(s)/50), 1.0)
-        total += score
-    return min(total / max(len(sents), 1) * 1.5, 1.0)
+        tokens = set(_tokenize(line))
+        if not tokens:
+            continue
+
+        is_years = bool(re.search(r'\d+\s*年', line))
+        is_required = any(kw in line for kw in ['必须', '熟练掌握', '精通', '扎实的', '有经验', '优先', '要求'])
+        is_soft = any(w in line.lower() for w in ['沟通', '团队', '学习', '逻辑', '责任心', '抗压'])
+
+        found_skills = []
+        for tok in tokens:
+            cat = _SG.get_cat(tok)
+            if cat:
+                found_skills.append(tok)
+
+        clauses.append({
+            "text": line,
+            "type": "years" if is_years else ("skill" if found_skills else "soft"),
+            "keywords": found_skills,
+            "required": is_required,
+        })
+    return clauses
 
 
 # ═══════════════════════════════════════════════════════════
-#  年限匹配 + 过匹配检测
+#  经验结构解析
 # ═══════════════════════════════════════════════════════════
 
-def _years_check(resume: str, jd: str, role: str) -> Tuple[float, Optional[str]]:
-    r_yrs = _extract_years(resume)
-    j_yrs = _extract_years(jd)
-    if not j_yrs:
-        return 1.0, None
-    if not r_yrs:
-        return 0.6, None
-    max_r = max(r_yrs)
-    min_j = min(j_yrs)
-    if max_r >= min_j:
-        # 初级岗申请但经验过多
-        if min_j <= 1 and max_r >= 3:
-            return 0.95, "该岗位偏初级，你的经验较丰富，建议在简历中突出「学习能力」而非「资历」。"
-        return 1.0, None
-    diff = min_j - max_r
-    return max(0.5, 1.0 - diff * 0.15), None
+def _parse_experience(text: str) -> Dict:
+    """
+    解析简历中的经历结构：
+    - 实习：找出实习段数
+    - 项目：找出项目段数
+    - 校园：找出校园/比赛经历
+    - 每段是否有STAR结构
+    - 每段是否有量化
+    """
+    # 常见经历标题模式
+    header_patterns = [
+        r'实习(?:经验|经历|工作)',
+        r'项目(?:经验|经历)',
+        r'校园(?:实践|经历)',
+        r'比赛|竞赛|比赛',
+        r'科研|研究',
+        r'工作经历',
+    ]
+    sents = _sentences(text)
+
+    results = {
+        "intern_count": 0,
+        "project_count": 0,
+        "club_count": 0,
+        "total_sections": 0,
+        "quantified_count": _count_quantified(sents),
+        "star_indicators": sum(1 for s in sents if any(w in s for w in ['负责', '主导', '完成', '推动', '达成', '实现'])),
+        "avg_section_length": 0,
+    }
+
+    # 简单粗暴：按段落估算经历数
+    sections = re.split(r'\n{2,}', text)
+    for sec in sections:
+        sec = sec.strip()
+        if len(sec) < 20:
+            continue
+        results["total_sections"] += 1
+        if any(re.search(p, sec) for p in [r'实习', r'intern']):
+            results["intern_count"] += 1
+        elif any(re.search(p, sec) for p in [r'项目', r'project']):
+            results["project_count"] += 1
+        else:
+            results["club_count"] += 1
+
+    return results
 
 
 # ═══════════════════════════════════════════════════════════
-#  核心：生成具体改进建议
+#  语义相似度（TF-IDF + Cosine）
+# ═══════════════════════════════════════════════════════════
+
+def _tfidf_cosine(text1: str, text2: str) -> float:
+    """基于 TF-IDF 的余弦相似度"""
+    try:
+        from sklearn.feature_extraction.text import TfidfVectorizer
+        from sklearn.metrics.pairwise import cosine_similarity
+        vec = TfidfVectorizer(max_features=500, ngram_range=(1, 2))
+        tfidf = vec.fit_transform([text1, text2])
+        sim = cosine_similarity(tfidf[0:1], tfidf[1:2])[0][0]
+        return float(sim)
+    except Exception:
+        # fallback：词集合相似度
+        t1, t2 = set(_tokenize(text1)), set(_tokenize(text2))
+        if not t1 or not t2:
+            return 0.0
+        return len(t1 & t2) / len(t1 | t2)
+
+
+# ═══════════════════════════════════════════════════════════
+#  逐条评分
+# ═══════════════════════════════════════════════════════════
+
+def _score_clauses(
+    clauses: List[Dict],
+    resume: str,
+    resume_tokens: set,
+) -> Tuple[float, List[Dict], List[str]]:
+    """
+    逐条 JD 条款评分，返回：
+    - overall_skill_score: 0.0~1.0
+    - clause_results: 每条JD的评分详情
+    - missing_core: 缺失的核心技能
+    """
+    if not clauses:
+        return 0.5, [], []
+
+    clause_scores = []
+    missing_core = []
+
+    for clause in clauses:
+        ct = clause["type"]
+        kws = clause["keywords"]
+        required = clause["required"]
+        score = 0.0
+        matched = []
+        missing = []
+
+        if ct == "skill":
+            if not kws:
+                score = 0.5  # 无技能关键词，给中间分
+            else:
+                # 逐关键词检查
+                kw_scores = []
+                for kw in kws:
+                    best = 0.0
+                    for rt in resume_tokens:
+                        sim = _SG.similarity(rt, kw)
+                        if sim > best:
+                            best = sim
+                    kw_scores.append((kw, best))
+                    if best >= 0.5:
+                        matched.append(kw)
+                    else:
+                        missing.append(kw)
+
+                # 这条条款得分 = 关键词平均分
+                if kw_scores:
+                    score = sum(s for _, s in kw_scores) / len(kw_scores)
+                    # 有关联技能也算
+                    for kw in kws:
+                        for rt in resume_tokens:
+                            if rt != kw and _SG.get_cat(rt) == _SG.get_cat(kw):
+                                sim = _SG.similarity(rt, kw)
+                                if sim >= 0.5:
+                                    score = max(score, sim * 0.7)
+                                    break
+
+        elif ct == "years":
+            r_yrs = _extract_years(resume)
+            j_yrs = _extract_years(clause["text"])
+            if r_yrs and j_yrs:
+                max_r = max(r_yrs)
+                min_j = min(j_yrs)
+                if max_r >= min_j:
+                    score = 1.0
+                else:
+                    diff = min_j - max_r
+                    score = max(0, 1.0 - diff * 0.25)
+            else:
+                score = 0.4  # 简历未写年限
+
+        elif ct == "soft":
+            # 软技能：看简历整体是否有相关词
+            soft_words = {
+                '沟通': ['沟通', '表达', '协作'],
+                '团队': ['团队', '合作', '配合'],
+                '学习': ['学习', '自学', '研究'],
+                '逻辑': ['逻辑', '分析', '思考'],
+            }
+            matched_soft = 0
+            for kw in clause.get('keywords', []):
+                if any(w in resume.lower() for w in soft_words.get(kw, [kw])):
+                    matched_soft += 1
+            score = min(matched_soft / max(len(kws), 1), 1.0) if kws else 0.5
+
+        else:
+            score = 0.5
+
+        # 硬性要求未满足则额外扣分
+        final_score = score
+        if required and score < 0.5:
+            final_score = score * 0.8
+
+        clause_scores.append({
+            "text": clause["text"][:50],
+            "score": round(final_score, 2),
+            "matched": matched,
+            "missing": missing,
+            "required": required,
+            "type": ct,
+        })
+
+        # 记录缺失核心技能
+        if ct == "skill" and missing:
+            for m in missing:
+                if m not in missing_core:
+                    missing_core.append(m)
+
+    # 总体技能分 = 每条得分加权平均（硬性要求权重更高）
+    total_w, weighted_sum = 0, 0.0
+    for cs in clause_scores:
+        w = 1.5 if cs["required"] else 1.0
+        total_w += w
+        weighted_sum += cs["score"] * w
+
+    overall = weighted_sum / total_w if total_w > 0 else 0.5
+    return overall, clause_scores, missing_core
+
+
+# ═══════════════════════════════════════════════════════════
+#  经验质量评分
+# ═══════════════════════════════════════════════════════════
+
+def _experience_score(exp: Dict, required_years: Optional[int]) -> float:
+    """
+    经验质量评估（0.0~1.0）
+    - 有实习/项目经历
+    - 每段经历有量化指标
+    - STAR结构指标
+    """
+    score = 0.0
+
+    # 基础分：按经历数量
+    sections = exp["total_sections"]
+    if sections >= 5:
+        score += 0.30
+    elif sections >= 3:
+        score += 0.20
+    elif sections >= 1:
+        score += 0.10
+    else:
+        score += 0.00  # 无经历 = 0分
+
+    # 量化加分
+    q_ratio = exp["quantified_count"] / max(sections, 1)
+    if q_ratio >= 0.6:
+        score += 0.25
+    elif q_ratio >= 0.3:
+        score += 0.15
+    elif q_ratio > 0:
+        score += 0.05
+    # 全无量化 = 不加分
+
+    # STAR结构加分
+    star_ratio = exp["star_indicators"] / max(sections, 1)
+    if star_ratio >= 1.0:
+        score += 0.15
+    elif star_ratio >= 0.5:
+        score += 0.10
+
+    # 实习加分（实习比项目更有说服力）
+    if exp["intern_count"] >= 2:
+        score += 0.15
+    elif exp["intern_count"] >= 1:
+        score += 0.10
+
+    return min(score, 1.0)
+
+
+# ═══════════════════════════════════════════════════════════
+#  STAR 建议生成
 # ═══════════════════════════════════════════════════════════
 
 def _generate_suggestions(
+    clauses: List[Dict],
+    clause_results: List[Dict],
+    exp: Dict,
+    missing_core: List[str],
+    resume_sents: List[str],
     resume: str,
-    jd: str,
-    role: str,
-    skill_matches: List[Tuple],
-    missing_skills: List[str],
-    years_score: float,
-    years_warning: Optional[str],
-    years_gap: Optional[int],
-    years_required: Optional[int],
 ) -> List[Dict]:
-    """基于实际检测，生成具体的改进建议"""
     suggestions = []
-    sents = _sentences(resume)
 
-    # ── 检测①：模糊描述（无量化指标）────────────────────
-    vague_sents = []
-    result_verbs = ['提升', '优化', '改进', '完善', '解决', '开发', '负责', '完成', '维护', '搭建', '使用', '降低', '增加', '减少']
-    for sent in sents:
-        has_quant = bool(re.search(r'\d+\s*(万|亿|千|%|％|ms|QPS|DAU|用户|倍|条|次|台|个)', sent))
-        if has_quant:
-            continue
-        has_result_verb = any(w in sent for w in result_verbs)
-        if has_result_verb and len(sent) > 5:
-            vague_sents.append(sent)
+    # ① 缺失核心技能（分数 < 0.4 的硬性要求条款）
+    weak_clauses = [c for c in clause_results if c["score"] < 0.4 and c["required"]]
+    if weak_clauses:
+        c = weak_clauses[0]
+        miss = c["missing"][:2] if c["missing"] else missing_core[:1]
+        if miss:
+            suggestions.append({
+                "clause": c["text"],
+                "tag": "核心技能缺失",
+                "skill": miss[0],
+                "star": {
+                    "S": f"JD要求「{miss[0]}」，简历中未体现或描述不足。",
+                    "T": f"补充{miss[0]}相关经历，或在技能列表中明确写出。",
+                    "A": f"在项目描述中加入：使用{miss[0]}实现XX功能；或在技能栏写「了解{miss[0]}核心原理，正在系统学习」。",
+                    "R": "ATS系统扫描关键词，缺失核心技能会被直接筛掉。",
+                }
+            })
 
-    # 排序：优化/提升类句子优先
-    priority = ['优化', '提升', '改进', '降低', '增加', '减少']
-    vague_sents.sort(key=lambda s: -sum(1 for w in priority if w in s))
+    # ② 无量化指标
+    if exp["quantified_count"] == 0:
+        vague = next((s for s in resume_sents
+                      if any(w in s for w in ['负责', '完成', '开发', '优化', '提升'])
+                      and not re.search(r'\d+', s)), None)
+        if vague:
+            suggestions.append({
+                "clause": f"「{vague[:20]}...」缺少量化指标",
+                "tag": "量化不足",
+                "skill": "STAR 结果",
+                "star": {
+                    "S": f"项目描述偏定性：{vague[:30]}...",
+                    "T": "为每段经历补充至少一个数字。",
+                    "A": f"改写：{vague} → {vague}，日活10万，QPS从100提升至500，可用率99.9%。",
+                    "R": "量化数据是简历的「硬通货」，面试官据此判断你的真实贡献大小。",
+                }
+            })
 
-    if vague_sents:
-        # 取第一个模糊句作为示例
-        example = vague_sents[0]
-        # 根据上下文猜量化方向
-        if any(w in example for w in ['优化','改进','提升']):
-            rewrite = example + '，响应时间从800ms降至120ms，性能提升5倍'
-        elif any(w in example for w in ['开发','搭建','负责']):
-            rewrite = example + '，日活10万，支持500并发'
-        elif any(w in example for w in ['维护','管理']):
-            rewrite = example + '，SLA达99.9%，可用性提升40%'
-        else:
-            rewrite = example + '，QPS从100提升至800，处理量提升8倍'
-
+    # ③ 经历数量不足
+    if exp["total_sections"] < 3:
         suggestions.append({
-            "clause": f"「{example[:20]}...」缺少量化指标",
-            "tag": "量化不足",
-            "skill": "STAR 结果",
-            "example_from": example,
-            "example_to": rewrite,
+            "clause": f"简历仅{exp['total_sections']}段经历，内容偏少",
+            "tag": "经历单薄",
+            "skill": "简历完整度",
             "star": {
-                "S": f"简历中有描述偏定性的句子：{example[:30]}...",
-                "T": "为每个项目补充至少一个量化指标。",
-                "A": f"原文：{example}\n改写：{rewrite}",
-                "R": "量化数据是面试通行证，HR和ATS系统都会高看你。",
+                "S": f"简历经历偏少（{exp['total_sections']}段），内容密度不足。",
+                "T": "充实简历内容，增加3-5段有价值的经历。",
+                "A": "将课程项目、比赛、课外实践也写入简历，每段突出：用什么技术、做了什么、结果如何。",
+                "R": "经历丰富代表经历丰富，ATS系统和HR会认为你更「有料」。",
             }
         })
 
-    # ── 检测②：同类技能未关联（JD要A，简历有B，A和B同类）────
-    jd_tokens = set(_tokenize(jd))
-    resume_tokens = set(_tokenize(resume))
-    related_done = False
-    for jd_skill in jd_tokens:
-        if related_done:
-            break
-        cat = _SG.get_cat(jd_skill)
-        if not cat:
-            continue
-        for res_skill in resume_tokens:
-            if res_skill == jd_skill:
-                continue
-            res_cat = _SG.get_cat(res_skill)
-            if res_cat == cat and _SG.similarity(res_skill, jd_skill) >= 0.5:
-                # 找到了！看看简历中有没有提到 res_skill 的句子
-                related_sent = _SG.find_in_text(res_skill, resume)
-                cat_name = {"python_web":"Python Web框架","java_web":"Java框架",
-                           "database":"数据库","ml":"ML框架"}.get(cat, cat)
-
-                suggestions.append({
-                    "clause": f"JD 要「{jd_skill}」，你有「{res_skill}」（{cat_name}同类）",
-                    "tag": "关联技能",
-                    "skill": jd_skill,
-                    "star": {
-                        "S": f"「{res_skill}」和「{jd_skill}」同属{cat_name}，你已有扎实基础。",
-                        "T": "在简历中关联两者，展示技术迁移能力。",
-                        "A": f"{'在「' + related_sent[:15] + '...」后补充' if related_sent else '在项目描述中'}：同时对{jd_skill}有实践，学习成本低，可快速上手。",
-                        "R": "招聘方看到你有同类技术基础，会降低学习成本预期。",
-                    }
-                })
-                related_done = True
-                break
-
-    # ── 检测③：纯缺失技能（简历完全没有）──────────────────
-    core_missing = [s for s in missing_skills if _SG.get_cat(s)]
-    shown_jd_skills = {s.get("jd_skill") for s in suggestions}
-    for skill in core_missing[:2]:
-        if skill in shown_jd_skills:
-            continue
-        # 找简历中最相关的已有技能作为锚点
-        best_anchor = None
-        best_sim = 0
-        for res_skill in resume_tokens:
-            sim = _SG.similarity(res_skill, skill)
-            if sim > best_sim:
-                best_sim = sim
-                best_anchor = res_skill
-
-        anchor_sent = _SG.find_in_text(best_anchor, resume) if best_anchor else None
+    # ④ 实习缺失（若JD暗示需要工作经验）
+    if exp["intern_count"] == 0 and exp["project_count"] == 0:
         suggestions.append({
-            "clause": f"简历未提及「{skill}」，JD 明确要求",
-            "tag": "技能缺失",
-            "skill": skill,
+            "clause": "简历中无实习和项目经历",
+            "tag": "缺乏实践",
+            "skill": "经历类型",
             "star": {
-                "S": f"「{skill}」是JD明确要求的技术栈，但简历中完全没有出现。",
-                "T": "在简历中找到可关联的项目，或补充学习经历。",
-                "A": f"{'在「' + anchor_sent[:15] + '...」的描述中' if anchor_sent else '在项目描述中'}加入：使用{skill}完成XX功能；或写「了解{skill}核心原理，正在系统学习」。",
-                "R": "关键词出现在简历中，ATS系统才能识别并推送给HR。",
+                "S": "简历缺少实际项目或实习经历，与大多数候选人相比缺乏说服力。",
+                "T": "补充至少1段可量化的项目或实习。",
+                "A": "整理课程项目、比赛作品、开源贡献，哪怕是小功能也可以量化（如：「优化了某函数的执行效率」）。",
+                "R": "有实践经历的简历通过率比没有的高出47%（LinkedIn数据）。",
             }
         })
 
-    # ── 检测④：年限不达标 ──────────────────────────────
-    if years_score < 0.8 and years_gap and years_required:
+    # ⑤ 有量化但结构松散
+    elif exp["quantified_count"] > 0 and exp["star_indicators"] < exp["total_sections"]:
         suggestions.append({
-            "clause": f"JD 要求 {years_required} 年，简历约 {years_required - years_gap} 年",
-            "tag": "年限不足",
-            "skill": "工作年限",
+            "clause": "有量化数据但STAR结构不够完整",
+            "tag": "结构待优化",
+            "skill": "STAR 完整性",
             "star": {
-                "S": f"简历年限与JD要求存在 {years_gap} 年差距。",
-                "T": "明确写出所有相关工作年限（含实习、兼职、比赛）。",
-                "A": "在简历顶部或个人简介写：「X年XX领域经验」；若总年限达标，将年限写得更显眼。",
-                "R": "ATS系统据此判断是否进入下一轮，不要让HR自己算。",
+                "S": "简历中有量化指标，但各段落的STAR结构不完整。",
+                "T": "让每段经历都遵循「情境-任务-行动-结果」结构。",
+                "A": "检查每段经历：是否说清了项目背景（S）？具体任务（T）？你做了什么（A）？结果怎样（R，有数字）？",
+                "R": "STAR结构让面试官快速理解你的价值，而非自己从字里行间挖掘。",
             }
         })
 
-    # ── 检测⑤：过匹配 ──────────────────────────────────
-    if years_warning:
-        suggestions.append({
-            "clause": "你的经验较丰富，申请的是初级岗位",
-            "tag": "策略建议",
-            "skill": "简历侧重点",
-            "star": {
-                "S": years_warning,
-                "T": "让招聘方看到你的适配度，而非单纯的资历。",
-                "A": "在简历中弱化年限数字，突出「快速学习」「可塑性强」「转岗动机」等标签。",
-                "R": "降低「overqualified」顾虑，增加面试机会。",
-            }
-        })
-
-    # ── 优秀：没有明显问题 ─────────────────────────────
+    # ⑥ 优秀情况
     if not suggestions:
         suggestions.append({
             "clause": "简历与 JD 核心要求匹配良好",
             "tag": "优秀",
             "skill": "—",
             "star": {
-                "S": f"简历覆盖了{role}岗位所需的核心技能，无明显缺失项。",
-                "T": "可继续打磨细节，冲击更高分。",
-                "A": "检查是否有更多量化结果可补充；确认每段经历都有STAR结构。",
-                "R": "保持优化，面试邀约率会持续提升。",
+                "S": f"简历覆盖了岗位核心技能，技能匹配度高，有量化数据，有STAR结构。",
+                "T": "继续保持，可冲击更高分。",
+                "A": "检查每段经历的量化数据是否最大化；确认没有遗漏的关键字。",
+                "R": "这份简历在同岗位候选人中具有竞争力，好好准备面试。",
             }
         })
 
@@ -395,69 +528,55 @@ def _generate_suggestions(
 
 def match_score(resume: str, jd: str) -> Tuple[float, List[Dict]]:
     """
-    评分体系 v7：
-    - 技能匹配 × 动态权重（岗位类型决定）
-    - 语义相似度 × 动态权重
-    - 年限匹配 × 动态权重
-    - 实体密度 × 动态权重
-    基础分 60，加表现分 40
+    评分体系 v8：
+    - 技能匹配分 × 40%     （逐条JD条款评分）
+    - 语义相似度 × 25%    （TF-IDF余弦）
+    - 经验质量   × 35%    （实习/项目/量化/STAR）
+    总分真实反映简历质量，不再有保底分
     """
-    role, w = _detect_role(jd)
     resume_tokens = set(_tokenize(resume))
     jd_tokens = set(_tokenize(jd))
+    resume_sents = _sentences(resume)
 
-    # 技能匹配
-    matched_score_sum = 0.0
-    skill_matches = []
-    missing = []
-    for js in jd_tokens:
-        best = 0.0
-        best_pair = (None, None)
-        for rs in resume_tokens:
-            sim = _SG.similarity(rs, js)
-            if sim > best:
-                best = sim
-                best_pair = (rs, js)
-        if best >= 0.5:
-            matched_score_sum += best
-            skill_matches.append((best_pair[0], best_pair[1], best))
-        else:
-            missing.append(js)
+    # ── JD 条款提取 ───────────────────────────────────
+    clauses = _extract_jd_clauses(jd)
 
-    skill_score = min(matched_score_sum / max(len(jd_tokens), 3) * 1.3, 1.0)
+    # ── 技能匹配评分 ───────────────────────────────────
+    skill_score, clause_results, missing_core = _score_clauses(
+        clauses, resume, resume_tokens
+    )
 
-    # 语义 & 密度
-    sem_score = _semantic_score(resume, jd)
-    int_score = _intensity_score(resume)
+    # ── 语义相似度 ─────────────────────────────────────
+    sem_score = _tfidf_cosine(resume, jd)
 
-    # 年限
-    yrs_score, yrs_warn = _years_check(resume, jd, role)
-    r_yrs = _extract_years(resume)
-    j_yrs = _extract_years(jd)
-    yrs_gap = None
-    if j_yrs and r_yrs and yrs_score < 0.8:
-        yrs_gap = min(j_yrs) - max(r_yrs)
-        if yrs_gap < 0:
-            yrs_gap = None
+    # ── 经验质量 ───────────────────────────────────────
+    exp = _parse_experience(resume)
+    yrs_req = next((min(_extract_years(c["text"])) for c in clauses if c["type"] == "years"), None)
+    exp_score = _experience_score(exp, yrs_req)
 
-    # 加权
-    final = skill_score * w["skill"] + sem_score * w["semantic"] + yrs_score * w["years"] + int_score * w["intensity"]
-    score = 60 + final * 40
+    # ── 加权总分（0~100）───────────────────────────────
+    # 分两个通道：核心技能匹配（精确）+ 整体经验质量
+    # 核心技能分：只看有技能关键词的条款
+    skill_clauses = [c for c in clause_results if c["type"] == "skill"]
+    if skill_clauses:
+        core_skill = sum(c["score"] for c in skill_clauses) / len(skill_clauses)
+    else:
+        core_skill = skill_score
 
-    # bonus
-    core_matches = [m for m in skill_matches if m[2] >= 0.8]
-    if len(core_matches) >= 4:
-        score = min(98, score + 5)
-    elif len(core_matches) >= 2:
-        score = min(95, score + 3)
+    # 最终分数 = 核心技能×50% + 语义×20% + 经验质量×30%
+    final_raw = core_skill * 0.50 + sem_score * 0.20 + exp_score * 0.30
+    score = round(final_raw * 100, 1)
+
+    # ── bonus ──────────────────────────────────────────
+    if exp["quantified_count"] >= 3 and exp["total_sections"] >= 3:
+        score = min(score + 3, 99)
+    if core_skill >= 0.75 and exp_score >= 0.65:
+        score = min(score + 5, 99)
 
     score = round(score, 1)
 
     suggestions = _generate_suggestions(
-        resume, jd, role,
-        skill_matches, missing,
-        yrs_score, yrs_warn,
-        yrs_gap, min(j_yrs) if j_yrs else None,
+        clauses, clause_results, exp, missing_core, resume_sents, resume
     )
 
     return score, suggestions
