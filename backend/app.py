@@ -62,8 +62,8 @@ def match():
         pass
 
     return jsonify({
-        "score": round(score, 3),          # 0~1 之间的小数
-        "suggestions": suggestions
+        "score": score,            # 0~100 的整数/小数
+        "suggestions": suggestions  # List[Dict] STAR 格式
     })
 
 # ==== 为调试提供简单主页 ====

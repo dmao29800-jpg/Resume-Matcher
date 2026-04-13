@@ -100,6 +100,15 @@ _SKILL_RE = re.compile(
     r"[\w\+\#\.\-]+", re.IGNORECASE
 )
 
+# 强度词 → 级别标签
+_LEVEL_TAGS = {
+    "精通": "硬核",
+    "熟练": "熟练",
+    "熟悉": "了解",
+    "掌握": "掌握",
+    "了解": "了解",
+}
+
 def _parse_jd(jd: str) -> Dict:
     """
     从 JD 文本中提取：
@@ -112,11 +121,60 @@ def _parse_jd(jd: str) -> Dict:
     # 出现 ≥2 次的词更可能是核心技能
     core = {w for w, c in counter.items() if c >= 2}
 
-    # 补充：太短的英文词跳过（如"js"、"py"单个字符）
+    # 太短的英文词跳过
     core = {w for w in core if len(w) >= 2}
 
     years = _extract_years(jd)
-    return {"core_keywords": core, "years": years}
+
+    # ── 新增：解析具体要求条款 ───────────────────────────
+    clauses = _extract_jd_clauses(jd)
+
+    return {"core_keywords": core, "years": years, "clauses": clauses}
+
+
+def _extract_jd_clauses(jd: str) -> List[Dict]:
+    """
+    按行/句拆解 JD，提取每个具体要求条款。
+    返回形如 [{"text": "熟悉Python和Django", "skills": ["python","django"], "level": null}]
+    """
+    lines = re.split(r"[\n\r•·\-–—]", jd)
+    clauses = []
+    seen = set()
+
+    for raw in lines:
+        line = raw.strip()
+        if len(line) < 6 or len(line) > 200:
+            continue
+
+        tokens = set(_tokenize(line))
+        if len(tokens) < 2:
+            continue
+
+        # 提取强度词
+        level = None
+        for kw, tag in _LEVEL_TAGS.items():
+            if kw in line:
+                level = tag
+                break
+
+        # 提取技能词（3字符以上，且非纯数字）
+        skills = [t for t in tokens if len(t) >= 2 and not t.isdigit()]
+        if not skills:
+            continue
+
+        # 去重（同条款内）
+        key = " ".join(sorted(skills))
+        if key in seen:
+            continue
+        seen.add(key)
+
+        clauses.append({
+            "text": line,
+            "skills": skills,
+            "level": level,
+        })
+
+    return clauses
 
 
 # ── 核心评分函数 ─────────────────────────────────────────
@@ -216,7 +274,7 @@ def _keyword_tfidf_score(resume: str, jd: str) -> float:
 
 # ── 主匹配函数 ─────────────────────────────────────────
 
-def match_score(resume: str, jd: str) -> Tuple[float, List[str]]:
+def match_score(resume: str, jd: str) -> Tuple[float, List[Dict]]:
     """
     计算简历与 JD 的综合匹配度（0~100）。
 
@@ -225,19 +283,25 @@ def match_score(resume: str, jd: str) -> Tuple[float, List[str]]:
       TF-IDF 加权得分   × 30%
       经验年限匹配      × 15%
       JD 需求覆盖率    × 15%
+
+    返回：
+      score        (float)  综合得分 0~100
+      suggestions  (List[Dict])  STAR 法则结构化建议
     """
     resume_tokens = _tokenize(resume)
+    resume_unique = set(resume_tokens)
 
     # 解析 JD
-    jd_parsed = _parse_jd(jd)
-    jd_core = jd_parsed["core_keywords"]
-    jd_years = jd_parsed["years"]
+    jd_parsed  = _parse_jd(jd)
+    jd_core    = jd_parsed["core_keywords"]
+    jd_years   = jd_parsed["years"]
+    clauses    = jd_parsed["clauses"]
 
     # 子项得分
     cov_score, hits, missed = _skills_coverage(resume_tokens, jd_core)
-    tfidf_score = _keyword_tfidf_score(resume, jd)
-    years_score = _years_match(resume, jd_years)
-    jd_cov_score = _jd_coverage_score(resume, jd)
+    tfidf_score             = _keyword_tfidf_score(resume, jd)
+    years_score             = _years_match(resume, jd_years)
+    jd_cov_score            = _jd_coverage_score(resume, jd)
 
     # 加权总分
     total = (
@@ -246,38 +310,127 @@ def match_score(resume: str, jd: str) -> Tuple[float, List[str]]:
         years_score  * 0.15 +
         jd_cov_score * 0.15
     )
-
-    # 归一化到 0~100
     score = round(total * 100, 1)
 
-    # ── 生成改进建议 ──────────────────────────────────────
-    suggestions = []
-
-    if cov_score < 0.6:
-        top_missing = sorted(missed, key=lambda x: -len(x))[:5]
-        for kw in top_missing:
-            suggestions.append(f"建议在简历中补充或强化「{kw}」相关技能描述")
-
-    if years_score < 0.6 and jd_years:
-        min_y = min(jd_years)
-        suggestions.append(
-            f"JD 要求至少 {min_y} 年经验，"
-            f"建议在简历中明确写出工作年限以提升匹配度"
-        )
-
-    if tfidf_score < 0.4:
-        suggestions.append(
-            "简历与 JD 的整体用语匹配度偏低，"
-            "建议参考 JD 关键词，适当调整简历描述方式"
-        )
-
-    if jd_cov_score < 0.5:
-        suggestions.append(
-            "简历覆盖的 JD 需求点较少，"
-            "建议逐条对照 JD 要求，在简历中补充对应内容"
-        )
-
-    if not suggestions:
-        suggestions.append("简历整体匹配度良好，针对上述细节可进一步优化。")
+    # ── STAR 法则生成改进建议 ─────────────────────────────
+    suggestions = _build_star_suggestions(resume, resume_unique, clauses,
+                                           jd_core, jd_years,
+                                           cov_score, tfidf_score,
+                                           years_score, jd_cov_score)
 
     return score, suggestions
+
+
+def _build_star_suggestions(
+    resume: str, resume_unique: set,
+    clauses: List[Dict], jd_core: set, jd_years: List[int],
+    cov_score: float, tfidf_score: float,
+    years_score: float, jd_cov_score: float
+) -> List[Dict]:
+    """
+    用 STAR 法则为每条未覆盖的 JD 条款生成结构化改进建议：
+      S – Situation   背景：在什么项目/业务场景下
+      T – Task        任务：负责什么，具体目标是什么
+      A – Action      行动：用了什么技术栈、怎么做的
+      R – Result      结果：量化成果（如 QPS 提升 X%，响应降低 Yms）
+    """
+
+    def clause_hit(clause: Dict) -> bool:
+        """判断简历是否覆盖了该条款的核心技能。"""
+        for sk in clause["skills"]:
+            if sk in resume_unique or any(sk in r for r in resume_unique if len(sk) >= 3):
+                return True
+        return False
+
+    suggestions = []
+
+    # ① 按 STAR 法则逐条生成未覆盖的 JD 条款建议
+    for clause in clauses:
+        if clause_hit(clause):
+            continue
+
+        skills_txt = "、".join(f"「{s}」" for s in clause["skills"][:4])
+        level_hint = f"（要求：{clause['level']}）" if clause["level"] else ""
+
+        suggestion = {
+            "clause":  clause["text"],
+            "tag":     "缺失",
+            "skill":   clause["skills"][0] if clause["skills"] else "",
+            "star": {
+                "S": f"在你参与过的项目或工作经历中，涉及过 {skills_txt} {level_hint} 的业务场景。",
+                "T": f"你需要在该项目中承担 / 主导 {skills_txt} 相关的技术实现或优化工作。",
+                "A": (
+                    f"使用 {skills_txt} 完成具体开发或优化，可描述："
+                    "采用了什么方案、解决了什么技术难点、如何保证质量。"
+                ),
+                "R": (
+                    f"给出可量化的结果，例如："
+                    "系统性能提升 X%、日均处理请求量达 N 条、稳定性保持 99.9% 以上。"
+                ),
+            }
+        }
+        suggestions.append(suggestion)
+
+    # ② 整体层面建议
+    if cov_score < 0.5:
+        top_missing = sorted(jd_core - {w for w in jd_core
+                     if any(w in r for r in resume_unique)},
+                     key=lambda x: -len(x))[:3]
+        if top_missing:
+            missing_txt = "、".join(f"「{w}」" for w in top_missing)
+            suggestions.append({
+                "clause":  missing_txt,
+                "tag":     "关键词不足",
+                "skill":   top_missing[0],
+                "star": {
+                    "S": "回顾你过往的项目经历，找出与缺失关键词相关的场景。",
+                    "T": "明确你在该场景中需要体现的技能方向。",
+                    "A": "在简历中用具体行为动词（设计、开发、优化）描述技术动作。",
+                    "R": "附上量化指标（提升幅度、规模、收益）。",
+                }
+            })
+
+    if years_score < 0.7 and jd_years:
+        min_y = min(jd_years)
+        suggestions.append({
+            "clause":  f"JD 要求 ≥ {min_y} 年经验",
+            "tag":     "年限不足",
+            "skill":   "工作经验",
+            "star": {
+                "S": f"回顾累计工作年限是否达到 {min_y} 年（含实习、兼职、项目经历）。",
+                "T": "明确总工作年限后，在简历开头或技能摘要中清晰呈现。",
+                "A": "将年限写在工作经历标题旁（如「3 年 Python 后端开发经验」），或写入自我介绍。",
+                "R": "招聘系统可自动识别，HR 第一眼即可确认达标。",
+            }
+        })
+
+    if tfidf_score < 0.35:
+        suggestions.append({
+            "clause":  "简历用语与 JD 关键词不一致",
+            "tag":     "语言匹配",
+            "skill":   "简历表述",
+            "star": {
+                "S": "JD 中反复出现的核心词汇（如 React、API 设计、MySQL）代表招聘方最看重的技能。",
+                "T": "将简历中对应的技术描述改为与 JD 一致的用语。",
+                "A": (
+                    "逐条对照 JD 高频词，把简历里的「用了 XX 技术」"
+                    "改为 JD 中使用的专业词汇（如「开发」→「构建」「设计」）。"
+                ),
+                "R": "用语对齐后，ATS 系统和 HR 扫描都能快速识别匹配度。",
+            }
+        })
+
+    if not suggestions:
+        suggestions.append({
+            "clause":  "简历整体匹配度良好",
+            "tag":     "优秀",
+            "skill":   "—",
+            "star": {
+                "S": "你的简历已覆盖 JD 核心技能需求，语言表达与岗位要求一致。",
+                "T": "可针对细节进一步打磨，争取更高分。",
+                "A": "检查每段经历是否都有量化的 R（结果）描述；确保时间线清晰连贯。",
+                "R": "优秀简历往往赢在「结果的量化」——数字是最有说服力的表达。",
+            }
+        })
+
+    return suggestions

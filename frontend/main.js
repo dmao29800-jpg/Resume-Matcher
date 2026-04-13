@@ -109,30 +109,71 @@ function showResult(score, suggestions) {
   // Animate ring
   requestAnimationFrame(() => {
     scoreFillEl.style.strokeDashoffset = offset;
-    // Animate number
     animateCount(scoreNumEl, 0, score, 1200);
-    // Bar fill
     scoreBarFill.style.width = score + "%";
-    // Label
     scoreLabelEl.textContent = labelFor(score);
-    // Color accent by score
     scoreFillEl.style.stroke = colorFor(score);
     scoreBarFill.style.background = colorFor(score);
   });
 
-  // Feedback list
+  // Feedback list — STAR 卡片
   feedbackEl.innerHTML = "";
-  if (suggestions && suggestions.length) {
-    suggestions.forEach(s => {
-      const li = document.createElement("li");
-      li.textContent = s;
-      feedbackEl.appendChild(li);
-    });
-  } else {
+  const list = Array.isArray(suggestions) ? suggestions : [];
+  if (list.length === 0) {
     const li = document.createElement("li");
     li.textContent = "简历与 JD 整体匹配度良好，针对上述细节可进一步优化。";
     feedbackEl.appendChild(li);
+    return;
   }
+
+  list.forEach((item, i) => {
+    const card = document.createElement("div");
+    card.className = "star-card" + (i === 0 ? " open" : ""); // 默认展开第一条
+
+    const tagClass = {
+      "缺失":     "tag-missing",
+      "关键词不足": "tag-keyword",
+      "年限不足":  "tag-years",
+      "语言匹配":  "tag-language",
+      "优秀":      "tag-great",
+    }[item.tag] || "tag-missing";
+
+    const star = item.star || {};
+
+    card.innerHTML = `
+      <div class="star-card__head">
+        <span class="star-card__clause">${escHtml(item.clause || item)}</span>
+        <div class="star-card__meta">
+          ${item.tag ? `<span class="star-card__tag ${tagClass}">${escHtml(item.tag)}</span>` : ""}
+          <svg class="star-card__chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </div>
+      </div>
+      <div class="star-card__body">
+        <div class="star-steps">
+          ${star.S ? `<div class="star-step"><span class="star-step__letter S">S</span><p class="star-step__text"><strong>Situation 背景：</strong>${escHtml(star.S)}</p></div>` : ""}
+          ${star.T ? `<div class="star-step"><span class="star-step__letter T">T</span><p class="star-step__text"><strong>Task 任务：</strong>${escHtml(star.T)}</p></div>` : ""}
+          ${star.A ? `<div class="star-step"><span class="star-step__letter A">A</span><p class="star-step__text"><strong>Action 行动：</strong>${escHtml(star.A)}</p></div>` : ""}
+          ${star.R ? `<div class="star-step"><span class="star-step__letter R">R</span><p class="star-step__text"><strong>Result 结果：</strong>${escHtml(star.R)}</p></div>` : ""}
+        </div>
+      </div>`;
+
+    // 点击折叠/展开
+    card.querySelector(".star-card__head").addEventListener("click", () => {
+      card.classList.toggle("open");
+    });
+
+    feedbackEl.appendChild(card);
+  });
+}
+
+function escHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function labelFor(s) {
