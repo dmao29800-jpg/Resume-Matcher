@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>简历‑岗位匹配器</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="container">
+    <h1>简历‑岗位匹配器</h1>
+
+    <section class="upload">
+      <label for="resume">简历（PDF / DOCX / TXT）</label>
+      <input type="file" id="resume" accept=".pdf,.docx,.txt">
+
+      <label for="jd">岗位要求（JD）</label>
+      <textarea id="jd" rows="6" placeholder="粘贴岗位要求..."></textarea>
+
+      <button id="analyzeBtn">立即分析</button>
+    </section>
+
+    <section class="result" id="result" hidden>
+      <h2>匹配结果</h2>
+      <p>匹配度：<span id="score"></span>%</p>
+      <div id="feedback"></div>
+    </section>
+  </main>
+
+  <script src="main.js"></script>
+</body>
+</html>
