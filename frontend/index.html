@@ -5,79 +5,114 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>简历 · JD 匹配度分析</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@300;400;500;600;700&family=Noto+Serif+SC:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
 
-  <!-- ─── Hero ─────────────────────────────────────── -->
-  <header class="hero">
-    <div class="hero__badge">AI 驱动</div>
-    <h1 class="hero__title">简历 · JD<br>匹配分析</h1>
-    <p class="hero__sub">上传简历，粘贴 JD，秒知匹配度与改进建议</p>
-  </header>
+  <!-- ─── 页面1：输入页 ───────────────────────────────── -->
+  <main class="page" id="inputPage">
+    <header class="hero">
+      <div class="hero__badge">AI 智能匹配</div>
+      <h1 class="hero__title">简历 · JD 匹配分析</h1>
+      <p class="hero__sub">上传简历，粘贴岗位描述，获取匹配度评分与改进建议</p>
+    </header>
 
-  <!-- ─── Main Form ─────────────────────────────────── -->
-  <main class="workspace">
-
-    <!-- 简历上传 -->
-    <div class="card">
-      <div class="card__header">
-        <span class="card__icon">📄</span>
-        <div>
-          <h2 class="card__title">上传简历</h2>
-          <p class="card__desc">支持 PDF · DOCX · TXT</p>
+    <div class="workspace">
+      <!-- 简历上传 -->
+      <div class="card">
+        <div class="card__header">
+          <span class="card__icon">📄</span>
+          <div>
+            <h2 class="card__title">上传简历</h2>
+            <p class="card__desc">支持 PDF · DOCX · TXT 格式</p>
+          </div>
+        </div>
+        <div class="drop-zone" id="dropZone">
+          <div class="drop-zone__inner" id="dropInner">
+            <svg class="drop-zone__icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+              <polyline points="17 8 12 3 7 8"/>
+              <line x1="12" y1="3" x2="12" y2="15"/>
+            </svg>
+            <p class="drop-zone__text">拖拽文件到这里，或<span class="link-btn" id="fakeBrowse">点击选择</span></p>
+            <p class="drop-zone__hint" id="fileName">尚未选择文件</p>
+            <p class="drop-zone__success" id="uploadSuccess" hidden>✓ 文件已就绪</p>
+          </div>
+          <input type="file" id="resume" accept=".pdf,.docx,.txt" hidden>
         </div>
       </div>
-      <div class="drop-zone" id="dropZone">
-        <div class="drop-zone__inner" id="dropInner">
-          <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
-            <polyline points="17 8 12 3 7 8"/>
-            <line x1="12" y1="3" x2="12" y2="15"/>
-          </svg>
-          <p class="drop-zone__text">拖拽文件到这里，或<span class="link-btn" id="fakeBrowse">点击选择文件</span></p>
-          <p class="drop-zone__hint" id="fileName">尚未选择文件</p>
+
+      <!-- JD 输入 -->
+      <div class="card">
+        <div class="card__header">
+          <span class="card__icon">🔍</span>
+          <div>
+            <h2 class="card__title">岗位描述（JD）</h2>
+            <p class="card__desc">粘贴完整的岗位要求内容</p>
+          </div>
         </div>
-        <input type="file" id="resume" accept=".pdf,.docx,.txt" hidden>
+        <textarea
+          id="jd"
+          rows="8"
+          placeholder="粘贴 JD 内容，例如：&#10;· 3 年以上 Python 后端开发经验&#10;· 熟悉 Django / FastAPI 框架&#10;· 熟练使用 MySQL、Redis&#10;· 本科及以上学历，计算机相关专业"
+        ></textarea>
+        <div class="textarea__counter"><span id="jdLen">0</span> 字</div>
+      </div>
+
+      <!-- 分析按钮 -->
+      <button class="btn-primary" id="analyzeBtn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
+        </svg>
+        开始分析
+      </button>
+    </div>
+  </main>
+
+  <!-- ─── 页面2：加载页 ───────────────────────────────── -->
+  <main class="page page--loading" id="loadingPage" hidden>
+    <div class="loading-wrap">
+      <div class="loading-spinner"></div>
+      <h2 class="loading__title">正在分析</h2>
+      <p class="loading__text">AI 正在对比简历与岗位要求...</p>
+      <div class="loading-steps">
+        <div class="loading-step" id="step1">
+          <span class="loading-step__dot"></span>
+          <span>提取简历关键词</span>
+        </div>
+        <div class="loading-step" id="step2">
+          <span class="loading-step__dot"></span>
+          <span>解析岗位需求</span>
+        </div>
+        <div class="loading-step" id="step3">
+          <span class="loading-step__dot"></span>
+          <span>计算匹配度</span>
+        </div>
+        <div class="loading-step" id="step4">
+          <span class="loading-step__dot"></span>
+          <span>生成改进建议</span>
+        </div>
       </div>
     </div>
+  </main>
 
-    <!-- JD 输入 -->
-    <div class="card">
-      <div class="card__header">
-        <span class="card__icon">🔍</span>
-        <div>
-          <h2 class="card__title">岗位描述（JD）</h2>
-          <p class="card__desc">粘贴完整的岗位要求内容</p>
-        </div>
-      </div>
-      <textarea
-        id="jd"
-        rows="8"
-        placeholder="粘贴 JD 内容，例如：&#10;· 3 年以上 Python 后端开发经验&#10;· 熟悉 Django / FastAPI 框架&#10;· 熟练使用 MySQL、Redis&#10;· 本科及以上学历，计算机相关专业"
-      ></textarea>
-      <div class="textarea__counter"><span id="jdLen">0</span> 字</div>
-    </div>
+  <!-- ─── 页面3：结果页 ───────────────────────────────── -->
+  <main class="page" id="resultPage" hidden>
+    <header class="result-header">
+      <button class="btn-back" id="backBtn">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="19" y1="12" x2="5" y2="12"/>
+          <polyline points="12 19 5 12 12 5"/>
+        </svg>
+        返回
+      </button>
+      <h1 class="result-header__title">分析结果</h1>
+    </header>
 
-    <!-- 分析按钮 -->
-    <button class="btn-primary" id="analyzeBtn">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>
-      </svg>
-      开始分析
-    </button>
-
-    <!-- Loading -->
-    <div class="loading" id="loading" hidden>
-      <div class="spinner"></div>
-      <p>分析中，请稍候…</p>
-    </div>
-
-    <!-- 结果区 -->
-    <section class="result-wrap" id="result" hidden>
-
-      <!-- 分数圆环 -->
+    <!-- 分数圆环 -->
+    <section class="score-section">
       <div class="score-ring-wrap">
         <div class="score-ring" id="scoreRing">
           <svg viewBox="0 0 120 120" class="score-ring__svg">
@@ -89,10 +124,10 @@
             <span class="score-ring__unit">分</span>
           </div>
         </div>
-        <p class="score-label" id="scoreLabel">分析完成</p>
+        <p class="score-label" id="scoreLabel">匹配度分析</p>
       </div>
 
-      <!-- 匹配度说明 -->
+      <!-- 分数说明 -->
       <div class="score-bar-wrap">
         <div class="score-bar">
           <div class="score-bar__fill" id="scoreBarFill"></div>
@@ -105,28 +140,71 @@
           <span>100</span>
         </div>
       </div>
-
-      <!-- 建议卡片 -->
-      <div class="tips-wrap" id="tipsWrap">
-        <h3 class="tips-title">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 20h9"/>
-            <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
-          </svg>
-          改进建议（STAR 法则）
-        </h3>
-        <ul class="tips-list" id="feedback"></ul>
-      </div>
-
-      <!-- 重新分析 -->
-      <button class="btn-ghost" id="resetBtn">← 重新分析</button>
     </section>
 
+    <!-- 建议卡片 -->
+    <section class="tips-section">
+      <div class="tips-header">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M12 20h9"/>
+          <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+        </svg>
+        <h2>改进建议</h2>
+        <span class="tips-count" id="tipsCount">0 条</span>
+      </div>
+      <ul class="tips-list" id="feedback"></ul>
+    </section>
+
+    <!-- 底部操作 -->
+    <div class="result-actions">
+      <button class="btn-primary btn-primary--outline" id="resetBtn">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="1 4 1 10 7 10"/>
+          <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+        </svg>
+        重新分析
+      </button>
+    </div>
   </main>
 
   <footer class="footer">
-    Powered by <strong>AI</strong> · Resume Matcher v2
+    <span class="footer__brand">Resume Matcher</span>
+    <span class="footer__version">v4.0</span>
   </footer>
+
+  <!-- 联系作者浮窗 -->
+  <div class="contact-fab" id="contactFab">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/>
+      <polyline points="22,6 12,13 2,6"/>
+    </svg>
+  </div>
+  <div class="contact-modal" id="contactModal" hidden>
+    <div class="contact-modal__content">
+      <button class="contact-modal__close" id="contactClose">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/>
+          <line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+      <div class="contact-modal__icon">✉️</div>
+      <h3 class="contact-modal__title">联系作者</h3>
+      <p class="contact-modal__desc">初学者制作，使用中遇到的问题欢迎联系作者进行反馈！</p>
+      <div class="contact-modal__email">
+        <span class="contact-modal__email-label">邮箱地址</span>
+        <div class="contact-modal__email-box">
+          <span class="contact-modal__email-text">1903300602@qq.com</span>
+          <button class="contact-modal__copy" id="copyEmail" title="复制邮箱">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+              <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+      <p class="contact-modal__copied" id="copiedTip" hidden>已复制到剪贴板</p>
+    </div>
+  </div>
 
   <script src="main.js"></script>
 </body>

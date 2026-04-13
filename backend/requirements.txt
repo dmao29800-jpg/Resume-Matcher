@@ -1,4 +1,6 @@
 flask==3.0.3
 flask-cors==5.0.0
-python-docx==1.1.2   # 用于读取 .docx
-pdfminer.six==20240706   # 用于读取 PDF（仅做简易文本抽取）
+python-docx==1.1.2
+pdfminer.six==20240706
+sentence-transformers>=2.0.0
+numpy>=1.20.0
