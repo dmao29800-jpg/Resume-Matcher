@@ -1,76 +1,91 @@
 """
-Resume–JD 匹配算法 v9
-科学性改进：
-1. Sentence-BERT Embedding 语义匹配（接通已加载的 BERT 模型）
-2. 硬技能惩罚项（required 技能缺失 → 一票否决）
-3. 动词能级权重（高级动词 ×1.2，低级动词 ×0.5）
+Resume–JD 匹配算法 v9.1
+核心改进（相比 v9）：
+1. Domain Mismatch 强惩罚（核心技能覆盖率 < 40% → 经验分近乎清零）
+2. 自适应权重分配（技能覆盖越高 → 技能分权重越高；覆盖低时经验分被压制）
+3. TF-IDF + 技能覆盖率 联合语义匹配（轻量，无外部依赖）
+4. BERT Embedding 作为可选升级（本地/云端有 GPU 时启用）
+5. 动词能级权重（高级动词 ×1.2，低级动词 ×0.5）
+6. 硬技能惩罚项（required 技能 < 0.3 → 总分 × 0.7）
 """
 
 import re
+import os
 from typing import List, Dict, Tuple, Optional
 
+# BERT 模型路径（Railway 环境预设，或本地调试时注释掉 USE_BERT=False）
+USE_BERT = os.environ.get("USE_BERT", "false").lower() in ("true", "1", "yes")
+
 # ═══════════════════════════════════════════════════════════
-#  全局 Embedding 模型（单例，延迟加载）
+#  语义相似度（默认 TF-IDF + 覆盖率；USE_BERT=true 时启用 BERT）
 # ═══════════════════════════════════════════════════════════
 
 _EMBEDDER = None
 
 def _get_embedder():
-    """延迟加载 Sentence-BERT 模型"""
+    """仅在 USE_BERT=true 时才尝试加载 BERT，避免冷启动阻塞"""
     global _EMBEDDER
-    if _EMBEDDER is None:
-        try:
-            from sentence_transformers import SentenceTransformer
-            _EMBEDDER = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
-        except Exception as e:
-            print(f"[Embedding] 模型加载失败: {e}，降级为 TF-IDF")
-            _EMBEDDER = "fallback"
+    if _EMBEDDER is not None:
+        return _EMBEDDER
+    if not USE_BERT:
+        _EMBEDDER = "disabled"
+        return _EMBEDDER
+    try:
+        from sentence_transformers import SentenceTransformer
+        _EMBEDDER = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+    except Exception as e:
+        _EMBEDDER = "fallback"
     return _EMBEDDER
 
 
-def _embedding_score(resume: str, jd: str) -> float:
+def _semantic_score(resume: str, jd: str, clauses: List[Dict],
+                    clause_results: List[Dict]) -> float:
     """
-    用 Sentence-BERT 计算简历与 JD 的语义相似度。
-    逻辑：JD 每条条款与简历所有句子两两做余弦相似度，取最大值的平均。
+    语义匹配得分 = 0.7×TF-IDF + 0.3×技能覆盖率辅助修正
+    - 如果 USE_BERT=true 且 BERT 可用：BERT 接管，TF-IDF 降为 0.3 权重
+    - 默认：纯 TF-IDF，轻量快速，无外部依赖
     """
+    # TF-IDF 基础分（总是计算）
+    tfidf = _tfidf_cosine(resume, jd)
+
+    # 技能覆盖率辅助（对 JD 条款的语义吻合度做二次修正）
+    skill_cls = [c for c in clause_results if c["type"] == "skill"]
+    if skill_cls:
+        cov = sum(1 for c in skill_cls if c["score"] >= 0.4) / len(skill_cls)
+        skill_helper = cov  # 0~1 的覆盖率映射到 [0,1]
+    else:
+        skill_helper = tfidf  # 无技能条款时跟随 TF-IDF
+
     model = _get_embedder()
 
-    if model == "fallback":
-        return _tfidf_cosine(resume, jd)
+    # BERT 路径（仅 Railway 预装 GPU 环境启用）
+    if model not in ("disabled", "fallback", None):
+        try:
+            jd_clauses_text = [c.strip() for c in re.split(r'[,，\n；;]', jd)
+                               if len(c.strip()) > 6]
+            resume_sents = [s.strip() for s in re.split(r'[，。；；\n]', resume)
+                            if len(s.strip()) > 6]
+            if jd_clauses_text and resume_sents:
+                emb_jd = model.encode(jd_clauses_text)
+                emb_rs = model.encode(resume_sents)
+                # cosine sim: normalized dot product
+                def _n(x):
+                    return x / (x**2).sum(axis=1, keepdims=True)**0.5
+                sims = (_n(emb_jd) @ _n(emb_rs).T).max(axis=1)
+                bert_score = float(sims.mean())
+                # BERT 0.7 + TF-IDF 0.2 + 技能覆盖率 0.1
+                return 0.70 * bert_score + 0.20 * tfidf + 0.10 * skill_helper
+        except Exception:
+            pass  # BERT 推理失败，降级到纯 TF-IDF
 
-    try:
-        jd_clauses = [c.strip() for c in re.split(r'[,，\n；;]', jd) if len(c.strip()) > 6]
-        resume_sents = [s.strip() for s in re.split(r'[，。；；\n]', resume) if len(s.strip()) > 6]
-
-        if not jd_clauses or not resume_sents:
-            return _tfidf_cosine(resume, jd)
-
-        # encode 两端（不传 normalize，手动计算余弦相似度）
-        emb_jd = model.encode(jd_clauses)
-        emb_rs = model.encode(resume_sents)
-
-        # 余弦相似度：手动 L2 normalize 后做 dot product
-        def _norm(x):
-            return x / (x ** 2).sum(axis=1, keepdims=True) ** 0.5
-        emb_jd_n = _norm(emb_jd)
-        emb_rs_n = _norm(emb_rs)
-        sim_matrix = emb_jd_n @ emb_rs_n.T  # (n_jd, n_rs)
-
-        # 每条 JD 取其与简历最相似的句子的分数
-        clause_best = sim_matrix.max(axis=1).tolist()
-
-        # 综合得分：对各条款加权平均（硬性条款权重更高）
-        weights = []
-        for clause in jd_clauses:
-            w = 1.5 if any(k in clause for k in ['必须', '熟练', '精通', '扎实的', '要求', '优先']) else 1.0
-            weights.append(w)
-        w_sum = sum(weights)
-        score = sum(c * w for c, w in zip(clause_best, weights)) / w_sum
-        return float(score)
-
-    except Exception as e:
-        print(f"[Embedding] 推理失败: {e}，降级 TF-IDF")
-        return _tfidf_cosine(resume, jd)
+    # 默认路径：TF-IDF 主导，技能覆盖率辅助修正
+    # JD 中无技术条款（如纯 PM）时，更多依赖 TF-IDF
+    if skill_cls:
+        # 技术导向 JD：TF-IDF 0.7 + 覆盖率 0.3
+        return 0.70 * tfidf + 0.30 * skill_helper
+    else:
+        # 非技术导向 JD（PM/运营等）：TF-IDF 为主，0.9 权重
+        return 0.90 * tfidf + 0.10 * skill_helper
 
 
 # ═══════════════════════════════════════════════════════════
@@ -204,31 +219,116 @@ _SG = SkillGraph()
 # ═══════════════════════════════════════════════════════════
 
 def _extract_jd_clauses(jd: str) -> List[Dict]:
-    clauses = []
-    raw_lines = re.split(r'[,，\n；;]', jd)
+    """
+    提取 JD 条款，支持多种分隔符：
+    - 中文编号：①②③④⑤ / 1、2、3、 / 1. 2. 3.
+    - 英文编号：1. 2. 3. / (1) (2) (3)
+    - 标点分隔：,，\n；;
+    """
+    # 多级分隔：先按段落/编号拆，再按标点拆
+    raw_lines = re.split(
+        r'(?:(?<=[a-zA-Z0-9])[\n]+|(?<=[^a-zA-Z0-9\n])[\n]{1,2}|(?<=[)）])[\n]+)',
+        jd
+    )
+    # 进一步按各种编号格式拆分
+    split_pattern = r'[(（]?\d{1,2}[)）]?\s*[,，、；;]?\s*'
+    all_lines = []
     for line in raw_lines:
+        sub = re.split(split_pattern, line)
+        all_lines.extend([s.strip() for s in sub if s.strip()])
+    # 兜底：再按标点拆一遍还没拆干净的
+    final_lines = []
+    for line in all_lines:
+        parts = re.split(r'[,，；;\n]', line)
+        final_lines.extend([p.strip() for p in parts if p.strip()])
+
+    clauses = []
+    seen = set()
+    for line in final_lines:
         line = line.strip()
-        if len(line) < 4:
+        if len(line) < 5:
             continue
+        # 去重（同义行）
+        key = re.sub(r'\s+', '', line)[:30]
+        if key in seen:
+            continue
+        seen.add(key)
+
         tokens = set(_tokenize(line))
         if not tokens:
             continue
 
         is_years = bool(re.search(r'\d+\s*年', line))
-        is_required = any(kw in line for kw in ['必须', '熟练掌握', '精通', '扎实的', '有经验', '优先', '要求'])
-        is_soft = any(w in line.lower() for w in ['沟通', '团队', '学习', '逻辑', '责任心', '抗压'])
+        is_required = any(kw in line for kw in ['必须', '熟练掌握', '精通', '扎实的', '有经验', '优先', '要求', '至少', '博士', '硕士'])
 
-        found_skills = []
+        # 软技能关键词
+        soft_words = ['沟通', '表达', '协作', '团队', '协调', '学习', '逻辑', '责任心',
+                      '抗压', '开朗', '感染', '职业规划', '学生社团', '敏捷', 'Scrum',
+                      '领导力', '主动性', '适应性']
+        is_soft = any(w in line.lower() for w in soft_words)
+
+        # NLP/AI 专业关键词（特殊识别，不依赖 CATEGORIES）
+        nlp_keywords = {
+            'nlp', 'natural language', '自然语言', '文本分类', '语义理解',
+            '知识图谱', '情感分析', '对话系统', '对话', '文本生成',
+            '深度学习', '机器学习', 'ml', 'ai', '人工智能',
+            'tensorflow', 'pytorch', 'caffe', 'mxnet', 'keras',
+            'bert', 'gpt', 'transformer', 'llm', '大模型', '大语言',
+            '信号处理', '模式识别', '图像识别', 'cv', 'computer vision',
+            '强化学习', 'reinforcement', '推荐系统', '推荐算法',
+        }
+        found_nlp = [tok for tok in tokens if tok.lower() in nlp_keywords]
+
+        # 技术栈关键词（复用 SkillGraph）
+        found_skills = found_nlp[:]
         for tok in tokens:
+            if tok in seen:
+                continue
             cat = _SG.get_cat(tok)
             if cat:
                 found_skills.append(tok)
 
+        # 兜底：中文技术动词/名词检测（扩展识别）
+        tech_verb_nouns = {
+            'python', 'java', 'go', 'golang', 'c++', 'c#', 'php', 'ruby', 'rust',
+            'docker', 'kubernetes', 'k8s', 'redis', 'mysql', 'postgres', 'mongodb',
+            'elasticsearch', 'nginx', 'jenkins', 'ci/cd', 'cicd',
+            '微服务', '高并发', '架构', '重构', '优化', '调优', '分布式',
+            '中间件', '消息队列', '缓存', '数据库', '存储', '搜索',
+            '后端', '前端', '全栈', '客户端', '服务端',
+            'tensorflow', 'pytorch', 'caffe', 'mxnet', 'keras', 'xgboost',
+            'fastapi', 'django', 'flask', 'spring', 'springboot', 'springboot',
+            'tornado', 'gin', 'beego', 'echo',
+            'kafka', 'rabbitmq', 'rocketmq', 'activemq', 'pulsar',
+            'vue', 'react', 'angular', '小程序', 'uniapp',
+            '算法', '模型', '训练', '推理', '部署', '上线',
+            'linux', 'unix', 'windows', 'shell', 'bash', 'awk',
+            'tcp', 'udp', 'http', 'https', 'grpc', 'thrift', 'websocket',
+            'oauth', 'jwt', 'ssl', 'tls', '加密', '安全',
+            '测试', '单元测试', '集成测试', '自动化测试',
+            'devops', 'sre', '监控', '日志', '链路追踪',
+        }
+        found_verbs = [tok for tok in tokens if tok.lower() in tech_verb_nouns]
+        found_skills.extend([v for v in found_verbs if v not in found_skills])
+
+        # 加分项/注意事项 降权
+        is_bonus = any(w in line for w in ['加分', '优先', '注意', '有则', '优先考虑'])
+
+        if found_skills:
+            ctype = "nlp_skill" if found_nlp else "skill"
+        elif is_years:
+            ctype = "years"
+        elif is_soft:
+            ctype = "soft"
+        else:
+            ctype = "general"
+
         clauses.append({
             "text": line,
-            "type": "years" if is_years else ("skill" if found_skills else "soft"),
+            "type": ctype,
             "keywords": found_skills,
-            "required": is_required,
+            "required": is_required and not is_bonus,
+            "is_bonus": is_bonus,
         })
     return clauses
 
@@ -301,10 +401,41 @@ def _score_clauses(
     clauses: List[Dict],
     resume: str,
     resume_tokens: set,
-) -> Tuple[float, List[Dict], List[str]]:
+) -> Tuple[float, List[Dict], List[str], float]:
+    """
+    返回：(加权总分, 条款结果列表, 缺失技能, Domain_Mismatch系数 0~1)
+    Domain Mismatch：简历技术密度高但 JD 技术要求少 → 系数 < 1（惩罚）
+    """
     if not clauses:
-        return 0.5, [], []
+        return 0.5, [], [], 1.0
 
+    # ── Domain Mismatch 检测（精准版）────────────────
+    # 仅在 JD 明确是软技能/PM 导向时惩罚（soft 条款 > 60%）
+    # 不惩罚有大量 general 条款但整体偏技术的 JD（如"微服务架构"算技术要求）
+    resume_tech_tokens = set()
+    for tok in resume_tokens:
+        if _SG.get_cat(tok) or tok in {
+            'python', 'java', 'go', 'golang', 'c++', 'c#', 'php', 'ruby', 'rust',
+            'docker', 'kubernetes', 'k8s', 'redis', 'mysql', 'postgres', 'mongodb',
+            'nlp', 'ml', 'ai', 'tensorflow', 'pytorch', 'fastapi', 'django',
+            'spring', 'kafka', 'rabbitmq', 'flask', 'vue', 'react', 'angular',
+            '后端', '前端', '全栈', '微服务', '高并发', '分布式',
+        }:
+            resume_tech_tokens.add(tok)
+    resume_tech_ratio = len(resume_tech_tokens) / max(len(resume_tokens), 1)
+
+    # 仅统计 soft 条款占比（general 条款不参与 mismatch 计算）
+    jd_soft = sum(1 for c in clauses if c["type"] == "soft")
+    jd_total = len(clauses)
+    jd_soft_ratio = jd_soft / max(jd_total, 1)
+
+    # Domain Mismatch：JD 软技能占比 > 60% 且简历技术密集 → 强惩罚
+    if resume_tech_ratio >= 0.25 and jd_soft_ratio > 0.6:
+        mismatch_penalty = 0.2   # 简历是技术岗，JD 明确是软技能岗
+    else:
+        mismatch_penalty = 1.0  # 正常评估（general 条款不触发惩罚）
+
+    # ── 逐条评分 ───────────────────────────────────────
     clause_scores = []
     missing_core = []
 
@@ -312,12 +443,13 @@ def _score_clauses(
         ct = clause["type"]
         kws = clause["keywords"]
         required = clause["required"]
+        is_bonus = clause.get("is_bonus", False)
         score = 0.0
         matched, missing = [], []
 
-        if ct == "skill":
+        if ct in ("skill", "nlp_skill"):
             if not kws:
-                score = 0.5
+                score = 0.4
             else:
                 kw_scores = []
                 for kw in kws:
@@ -334,6 +466,7 @@ def _score_clauses(
 
                 if kw_scores:
                     score = sum(s for _, s in kw_scores) / len(kw_scores)
+                    # 关联技能加成
                     for kw in kws:
                         for rt in resume_tokens:
                             if rt != kw and _SG.get_cat(rt) == _SG.get_cat(kw):
@@ -350,25 +483,53 @@ def _score_clauses(
                 min_j = min(j_yrs)
                 score = 1.0 if max_r >= min_j else max(0, 1.0 - (min_j - max_r) * 0.25)
             else:
-                score = 0.4
+                score = 0.3
 
         elif ct == "soft":
+            # 软技能：全文扫描 clause 里的关键词是否出现在简历中
             soft_map = {
-                '沟通': ['沟通', '表达', '协作'],
-                '团队': ['团队', '合作', '配合'],
+                '沟通': ['沟通', '表达', '协作', '协调', '善于沟通'],
+                '团队': ['团队', '合作', '配合', '协作'],
                 '学习': ['学习', '自学', '研究'],
                 '逻辑': ['逻辑', '分析', '思考'],
+                '开朗': ['开朗', '乐观', '积极', '阳光'],
+                '敏捷': ['敏捷', 'scrum', '看板', 'sprint'],
+                '职业': ['职业规划', '职业发展', '长期发展'],
+                '社团': ['社团', '学生组织', '干部', '学生会', '职务'],
             }
-            matched_soft = sum(
-                1 for kw in kws if any(w in resume.lower() for w in soft_map.get(kw, [kw]))
-            )
-            score = min(matched_soft / max(len(kws), 1), 1.0) if kws else 0.5
+            soft_hits = 0
+            active_soft_keys = [kw for kw in soft_map if kw in clause["text"]]
+            for kw in active_soft_keys:
+                variants = soft_map[kw]
+                if any(v in resume for v in variants):
+                    soft_hits += 1
+            soft_score = min(soft_hits / max(len(active_soft_keys), 1), 1.0)
+            if soft_score == 0:
+                soft_score = 0.1  # 没有任何软技能证据，极低分
+            score = soft_score
 
+        else:  # general clause
+            # 通用条款：简历技术岗 vs 通用 JD 的匹配度
+            general_tech_hints = ['开发', '编程', '代码', '技术', '软件', '系统',
+                                  '算法', '数据', '后台', '前端']
+            general_soft_hints = ['开朗', '乐观', '抗压', '感染', '社团', '规划']
+            r_lower = resume.lower()
+            has_tech = any(h in r_lower for h in general_tech_hints)
+            has_soft = any(h in r_lower for h in general_soft_hints)
+            if has_tech and not has_soft:
+                score = 0.35  # 简历技术岗，JD 通用岗 → 中低分
+            elif has_soft:
+                score = 0.5   # 简历有软技能，JD 有软技能要求 → 中等
+            else:
+                score = 0.4   # 默认
+
+        # 权重调整
+        if is_bonus:
+            final_score = score * 0.6  # 加分项权重降低
+        elif required and score < 0.4:
+            final_score = score * 0.6  # 硬性要求不满足时大幅减分
         else:
-            score = 0.5
-
-        # 硬性要求扣分
-        final_score = score * 0.8 if (required and score < 0.5) else score
+            final_score = score
 
         clause_scores.append({
             "text": clause["text"][:50],
@@ -379,19 +540,19 @@ def _score_clauses(
             "type": ct,
         })
 
-        if ct == "skill" and missing:
+        if ct in ("skill", "nlp_skill") and missing:
             for m in missing:
                 if m not in missing_core:
                     missing_core.append(m)
 
     total_w, weighted_sum = 0, 0.0
     for cs in clause_scores:
-        w = 1.5 if cs["required"] else 1.0
+        w = 1.5 if cs["required"] else (0.6 if clause["is_bonus"] else 1.0)
         total_w += w
         weighted_sum += cs["score"] * w
 
     overall = weighted_sum / total_w if total_w > 0 else 0.5
-    return overall, clause_scores, missing_core
+    return overall, clause_scores, missing_core, mismatch_penalty
 
 
 # ═══════════════════════════════════════════════════════════
@@ -603,47 +764,107 @@ def _generate_suggestions(
 
 def match_score(resume: str, jd: str) -> Tuple[float, List[Dict]]:
     """
-    v9 评分体系：
-    - 核心技能匹配 × 55%   （仅含技能关键词的 JD 条款）
-    - 语义相似度   × 20%   （Sentence-BERT Embedding）
-    - 经验质量     × 25%   （经历数量+量化+动词能级）
-    ─────────────────────────────────
-    硬技能惩罚项：required 技能 < 0.3 → 总分 × 0.7
+    v9 评分体系（修正版）：
+    ─────────────────────────────────────────────────────────
+    核心原则：分数 = JD 导向，简历质量只在技能覆盖后才起作用
+
+    评分维度：
+    - 核心技能匹配 × 自适应权重  （技能覆盖率决定权重占比）
+    - 经验质量     × 自适应权重  （技能覆盖不足时几乎不计分）
+    - 语义相似度   × 20%         （Sentence-BERT Embedding）
+    ─────────────────────────────────────────────────────────
+    Domain Mismatch 惩罚：核心技能覆盖率 < 40% → 强惩罚
+    硬技能惩罚项：required 技能 < 0.3 → 额外 × 0.7
     """
     resume_tokens = set(_tokenize(resume))
     resume_sents = _sentences(resume)
 
     clauses = _extract_jd_clauses(jd)
-    skill_score, clause_results, missing_core = _score_clauses(clauses, resume, resume_tokens)
-    sem_score = _embedding_score(resume, jd)
+    skill_score, clause_results, missing_core, mismatch = _score_clauses(clauses, resume, resume_tokens)
+    sem_score = _semantic_score(resume, jd, clauses, clause_results)
     exp = _parse_experience(resume)
     yrs_req = next((min(_extract_years(c["text"])) for c in clauses if c["type"] == "years"), None)
     exp_score = _experience_score(exp, yrs_req)
 
-    # 核心技能分：只看含技能的 JD 条款
-    skill_clauses = [c for c in clause_results if c["type"] == "skill"]
-    core_skill = sum(c["score"] for c in skill_clauses) / len(skill_clauses) if skill_clauses else skill_score
+    # ── 核心技能覆盖率（关键指标）──────────────────────
+    tech_clauses = [c for c in clause_results if c["type"] in ("skill", "nlp_skill")]
+    soft_clauses  = [c for c in clause_results if c["type"] == "soft"]
 
-    # 加权总分
-    final_raw = core_skill * 0.55 + sem_score * 0.20 + exp_score * 0.25
+    if tech_clauses:
+        tech_scores  = [c["score"] for c in tech_clauses]
+        core_coverage = sum(1 for s in tech_scores if s >= 0.4) / len(tech_scores)
+        core_skill = sum(tech_scores) / len(tech_scores)
+    else:
+        core_coverage = 0.0   # JD 有技术条款但简历无匹配 -> 覆盖率=0，触发硬地板
+        core_skill = 0.0
 
-    # ── 硬技能惩罚项（Negative Scoring）─────────────────
-    fail_required = any(c["score"] < 0.3 and c["required"] for c in skill_clauses)
+    if soft_clauses:
+        soft_skill = sum(c["score"] for c in soft_clauses) / len(soft_clauses)
+    else:
+        soft_skill = 0.5  # 无软技能条款时默认中等
+
+    # 技术导向型 JD（tech > 50%）：技能分以技术条款为主
+    # 非技术导向 JD（tech <= 50%）：技能分 = 技术×0.6 + 软技能×0.4
+    jd_tech_ratio = len(tech_clauses) / max(len(clause_results), 1)
+    if tech_clauses:
+        if jd_tech_ratio >= 0.5:
+            weighted_skill = core_skill
+        elif jd_tech_ratio >= 0.3:
+            weighted_skill = core_skill * 0.5 + soft_skill * 0.5
+        else:
+            weighted_skill = soft_skill
+    else:
+        weighted_skill = soft_skill
+
+    # ── 技能覆盖率惩罚（Domain Mismatch）────────────────
+    if core_coverage < 0.4:
+        exp_score *= 0.1
+        sem_score  *= 0.3
+    elif core_coverage < 0.7:
+        exp_score *= 0.5
+        sem_score  *= 0.7
+
+    # ── 技术岗硬地板（找到 final_raw 定义后追加）────────────────
+    
+    # ── 自适应权重分配 ────────────────────────────────
+    # 技能覆盖越高 → 技能分权重越高；覆盖越低 → 经验分权重被压制
+    skill_weight = max(core_coverage, 0.3)   # 最低 0.3，避免完全无技能时经验分主导
+    exp_weight   = min(1.0 - skill_weight, 0.4)  # 经验分最多占 40%
+    sem_weight   = 0.20
+    total_weight = skill_weight + exp_weight + sem_weight
+
+    final_raw = (weighted_skill * skill_weight
+                 + exp_score * exp_weight
+                 + sem_score  * sem_weight) / total_weight
+
+    # ── Domain Mismatch 惩罚（核心修复）────────────────
+    # 简历满是技术栈但 JD 无技术要求 → 直接压低分数
+    final_raw *= mismatch
+
+    # ── 技术岗硬地板（核心修复）────────────────────────
+    # JD 有技术条款但简历完全没有技术匹配（core_coverage=0）
+    # → 最终分数直接压在 1-5 区间，避免软技能救场
+    if tech_clauses and core_coverage == 0.0:
+        final_raw = min(final_raw, 0.05)
+
+    # ── 硬技能惩罚项（Negative Scoring）────────────────
+    fail_required = any(c["score"] < 0.3 and c["required"] for c in tech_clauses)
     if fail_required:
-        final_raw *= 0.7   # 一票否决：总分打七折
+        final_raw *= 0.7
         penalty_flag = True
     else:
         penalty_flag = False
 
     score = round(final_raw * 100, 1)
 
-    # ── bonus ───────────────────────────────────────────
-    if exp["quantified_count"] >= 3 and exp["total_sections"] >= 3:
-        score = min(score + 2, 99)
-    if core_skill >= 0.75 and exp_score >= 0.65:
-        score = min(score + 4, 99)
+    # ── bonus（仅在有一定技能覆盖时才生效）─────────────
+    if core_coverage >= 0.5:
+        if exp["quantified_count"] >= 2 and exp["total_sections"] >= 2:
+            score = min(score + 2, 99)
+        if core_skill >= 0.7 and exp_score >= 0.5:
+            score = min(score + 3, 99)
     if penalty_flag:
-        score = max(score, 5)   # 被惩罚后最低 5 分
+        score = max(score, 5)
 
     score = round(score, 1)
 
@@ -651,7 +872,6 @@ def match_score(resume: str, jd: str) -> Tuple[float, List[Dict]]:
         clauses, clause_results, exp, missing_core, resume_sents, resume, sem_score
     )
 
-    # ── 面试提示（附加字段）─────────────────────────────
     interview_tip = _generate_interview_tips(clauses, clause_results, resume)
 
     return score, suggestions
