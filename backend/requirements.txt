@@ -2,5 +2,6 @@ flask==3.0.3
 flask-cors==5.0.0
 python-docx==1.1.2
 pdfminer.six==20240706
-sentence-transformers>=2.0.0
+scikit-learn>=1.0.0
 numpy>=1.20.0
+gunicorn>=21.0.0
