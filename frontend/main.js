@@ -1,8 +1,8 @@
 /* ── API ──────────────────────────────────────────── */
-// 开发环境使用本地地址，生产环境使用环境变量或相对路径
+// 开发环境使用本地地址，生产环境使用 Railway 后端
 const API_BASE = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
   ? "http://127.0.0.1:5000/"
-  : (window.BACKEND_URL || "https://resume-matcher-backend.railway.app/");
+  : "https://web-production-26e2c.up.railway.app/";
 
 /* ── Pages ─────────────────────────────────────────── */
 const inputPage   = document.getElementById("inputPage");
