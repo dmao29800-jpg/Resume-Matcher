@@ -1,0 +1,39 @@
+﻿python : Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate l
+imits and faster downloads.
+所在位置 行:1 字符: 218
++ ... e-coding\Resume-Matcher\backend"; python test_matcher.py 2>&1 | Out-F ...
++                                       ~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Warning: You ar...ster downloads.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+=== JD Weighted Skills ===
+  skill=精通python后端开发, weight=1.50, level=精通, line=1. 精通Python后端开发
+  skill=熟悉django或fastapi框架, weight=0.92, level=None, line=2. 熟悉Django或FastAPI框架
+  skill=熟练使用mysql数据库, weight=1.00, level=熟练, line=3. 熟练使用MySQL数据库
+  skill=有redis缓存使用经验, weight=0.75, level=None, line=4. 有Redis缓存使用经验
+  skill=本科及以上学历, weight=0.67, level=None, line=5. 本科及以上学历
+  skill=了解golang优先, weight=0.58, level=None, line=6. 了解Golang优先
+  years=[]
+  lines count=6
+
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]
+Loading weights: 100%|██████████| 199/199 [00:00<00:00, 5048.98it/s]
+[1mBertModel LOAD REPORT[0m from: sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+Key                     | Status     |  | 
+------------------------+------------+--+-
+embeddings.position_ids | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+
+=== Skill Match Score: 0.000 ===
+  精通python后端开发: matched=False, method=semantic:0.52, weight=1.50
+  熟悉django或fastapi框架: matched=False, method=semantic:0.30, weight=0.92
+  熟练使用mysql数据库: matched=False, method=semantic:0.44, weight=1.00
+  有redis缓存使用经验: matched=False, method=semantic:0.45, weight=0.75
+  本科及以上学历: matched=False, method=semantic:0.06, weight=0.67
+  了解golang优先: matched=False, method=semantic:0.17, weight=0.58
+
+=== Final Score: 36.1 ===
+  Suggestion 1: [核心技能缺失] 1. 精通Python后端开发
+  Suggestion 2: [核心技能缺失] 3. 熟练使用MySQL数据库
